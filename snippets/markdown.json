@@ -1,0 +1,66 @@
+{
+  "Python Code Block": {
+    "prefix": "py",
+    "body": [
+      "```python",
+      "$0",
+      "```"
+    ],
+    "description": "Insert Python code block"
+  },
+  "Python Code Block with Function": {
+    "prefix": "pyf",
+    "body": [
+      "```python",
+      "def ${1:function_name}(${2:args}):",
+      "    ${0:pass}",
+      "```"
+    ],
+    "description": "Insert Python function code block"
+  },
+  "JavaScript Code Block": {
+    "prefix": "js",
+    "body": [
+      "```javascript",
+      "$0",
+      "```"
+    ],
+    "description": "Insert JavaScript code block"
+  },
+  "Bash Code Block": {
+    "prefix": "sh",
+    "body": [
+      "```bash",
+      "$0",
+      "```"
+    ],
+    "description": "Insert Bash code block"
+  },
+  "SQL Code Block": {
+    "prefix": "sql",
+    "body": [
+      "```sql",
+      "$0",
+      "```"
+    ],
+    "description": "Insert SQL code block"
+  },
+  "R Code Block": {
+    "prefix": "r",
+    "body": [
+      "```r",
+      "$0",
+      "```"
+    ],
+    "description": "Insert R code block"
+  },
+  "Output Block": {
+    "prefix": "out",
+    "body": [
+      "```output",
+      "$0",
+      "```"
+    ],
+    "description": "Insert output block"
+  }
+}
