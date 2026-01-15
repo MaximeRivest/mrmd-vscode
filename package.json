@@ -2,7 +2,7 @@
   "name": "mrmd-vscode-new",
   "displayName": "mrmd - Markdown that Runs",
   "description": "Execute code blocks in markdown files with real-time output",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "mrmd",
   "license": "MIT",
   "repository": {

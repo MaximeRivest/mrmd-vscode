@@ -160,8 +160,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // Listen to active editor changes
     context.subscriptions.push(
-        vscode.window.onDidChangeActiveTextEditor(editor => {
+        vscode.window.onDidChangeActiveTextEditor(async (editor) => {
             decorationProvider.updateDecorations(editor);
+
+            // Handle document switching for monitor mode
+            if (editor && editor.document.languageId === 'markdown') {
+                if (boundDocument && editor.document !== boundDocument) {
+                    // Document changed - need to rebind
+                    await handleDocumentSwitch(editor.document);
+                }
+            }
         })
     );
 
@@ -211,7 +219,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 export function deactivate(): void {
     console.log('mrmd extension deactivating...');
+    cleanupMonitorMode();
     orchestratorClient?.stop();
+}
+
+/**
+ * Handle switching to a different document.
+ *
+ * This disconnects from the old Yjs document and connects to the new one.
+ */
+async function handleDocumentSwitch(newDocument: vscode.TextDocument): Promise<void> {
+    if (!orchestratorClient.syncUrl || !orchestratorClient.runtimeUrl) {
+        return;
+    }
+
+    console.log(`[mrmd] Switching document binding to ${newDocument.uri.fsPath}`);
+
+    // Clean up old binding
+    cleanupMonitorMode();
+
+    // Set up for new document
+    await setupMonitorMode(orchestratorClient.syncUrl, orchestratorClient.runtimeUrl);
 }
 
 // ============================================================================
@@ -428,8 +456,16 @@ async function startServices(): Promise<void> {
         const urls = await orchestratorClient.start({
             workspaceFolder: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
         });
+
+        // Set up MRP client for direct mode fallback
         mrpClient = new MrpClient(urls.runtime);
         executionManager.setClient(mrpClient);
+
+        // Set up monitor mode if sync URL is available
+        if (urls.sync) {
+            await setupMonitorMode(urls.sync, urls.runtime);
+        }
+
         updateStatusBar(true);
         vscode.window.showInformationMessage('mrmd services started');
     } catch (err) {
@@ -438,7 +474,108 @@ async function startServices(): Promise<void> {
     }
 }
 
+/**
+ * Set up monitor mode with Yjs connection.
+ *
+ * This connects to mrmd-sync, binds the active document to Y.Text,
+ * and enables monitor mode in ExecutionManager.
+ */
+async function setupMonitorMode(syncUrl: string, runtimeUrl: string): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document.languageId !== 'markdown') {
+        console.log('[mrmd] No active markdown editor, skipping monitor mode setup');
+        return;
+    }
+
+    const document = editor.document;
+
+    // Generate document name for Yjs (use relative path from workspace)
+    const docName = getDocumentName(document);
+
+    console.log(`[mrmd] Setting up monitor mode for ${docName}`);
+
+    try {
+        // 1. Create and connect Yjs client
+        yjsClient = new YjsClient();
+        await yjsClient.connect({ syncUrl, docName });
+        console.log('[mrmd] Connected to mrmd-sync');
+
+        // 2. Create document binding
+        yjsBinding = new VsCodeYjsBinding({
+            yText: yjsClient.yText,
+            document,
+        });
+        await yjsBinding.initialize();
+        boundDocument = document;
+        console.log('[mrmd] Document binding established');
+
+        // 3. Create monitor coordination
+        monitorCoordination = createMonitorCoordination(yjsClient.ydoc);
+
+        // 4. Set awareness state (identify as VS Code)
+        yjsClient.setAwarenessState({
+            name: 'VS Code',
+            color: '#007ACC',
+        });
+
+        // 5. Create session with orchestrator (ensures monitor is watching)
+        try {
+            await orchestratorClient.createSession(docName);
+            console.log('[mrmd] Session created with orchestrator');
+        } catch (err) {
+            console.warn('[mrmd] Failed to create session (monitor may not be watching):', err);
+        }
+
+        // 6. Enable monitor mode in execution manager
+        executionManager.enableMonitorMode({
+            coordination: monitorCoordination,
+            yText: yjsClient.yText,
+            runtimeUrl,
+        });
+
+        console.log('[mrmd] Monitor mode enabled');
+    } catch (err) {
+        console.error('[mrmd] Failed to set up monitor mode:', err);
+        // Fall back to direct mode (already set up above)
+        cleanupMonitorMode();
+    }
+}
+
+/**
+ * Clean up monitor mode resources.
+ */
+function cleanupMonitorMode(): void {
+    if (monitorCoordination) {
+        monitorCoordination.destroy();
+        monitorCoordination = null;
+    }
+    if (yjsBinding) {
+        yjsBinding.dispose();
+        yjsBinding = null;
+    }
+    if (yjsClient) {
+        yjsClient.dispose();
+        yjsClient = null;
+    }
+    boundDocument = null;
+    executionManager.disableMonitorMode();
+}
+
+/**
+ * Get document name for Yjs (relative path from workspace).
+ */
+function getDocumentName(document: vscode.TextDocument): string {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (workspaceFolder) {
+        const relativePath = vscode.workspace.asRelativePath(document.uri, false);
+        return relativePath;
+    }
+    // Fallback: use full path with slashes replaced
+    return document.uri.fsPath.replace(/\//g, '__').replace(/\\/g, '__');
+}
+
 async function stopServices(): Promise<void> {
+    cleanupMonitorMode();
     await orchestratorClient.stop();
     mrpClient = null;
     updateStatusBar(false);
