@@ -1,7 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
-  <!-- Markdown symbol (M) with play indicator -->
-  <rect x="2" y="4" width="20" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/>
-  <path d="M6 8v8l3-4 3 4V8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- mrmd icon: #▸ - markdown that runs -->
+  <!-- Hash # symbol -->
+  <g fill="#1a1a1a">
+    <!-- Vertical bars -->
+    <rect x="1.5" y="1.5" width="3" height="17" rx="0.5"/>
+    <rect x="8" y="1.5" width="3" height="17" rx="0.5"/>
+    <!-- Horizontal bars (slightly slanted) -->
+    <rect x="0" y="5.5" width="13" height="2.8" rx="0.5" transform="rotate(-8 6.5 6.9)"/>
+    <rect x="0" y="11.5" width="13" height="2.8" rx="0.5" transform="rotate(-8 6.5 12.9)"/>
+  </g>
   <!-- Play triangle -->
-  <polygon points="15,10 15,14 18,12" fill="currentColor"/>
+  <polygon points="14.5,5.5 14.5,18.5 23,12" fill="#1a1a1a"/>
 </svg>
