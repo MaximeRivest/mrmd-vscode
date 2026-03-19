@@ -21,38 +21,55 @@ interface SetupStatus {
 export class SetupManager {
     private outputChannel: vscode.OutputChannel;
 
-    constructor() {
-        this.outputChannel = vscode.window.createOutputChannel('mrmd Setup');
+    constructor(outputChannel: vscode.OutputChannel) {
+        this.outputChannel = outputChannel;
     }
 
     /**
      * Check current setup status.
      */
     async checkStatus(): Promise<SetupStatus> {
-        const [uvAvailable, pipAvailable, pythonPath] = await Promise.all([
-            this.commandExists('uv --version'),
-            this.commandExists('pip --version'),
+        this.outputChannel.appendLine('[setup] Checking environment...');
+
+        const [uvResult, pipResult, pythonPath] = await Promise.all([
+            this.runCommand('uv --version'),
+            this.runCommand('pip --version'),
             this.findPython(),
         ]);
+
+        const uvAvailable = uvResult.success;
+        const pipAvailable = pipResult.success;
+
+        this.outputChannel.appendLine(`[setup] uv: ${uvAvailable ? uvResult.stdout.trim() : 'not found'}`);
+        this.outputChannel.appendLine(`[setup] pip: ${pipAvailable ? pipResult.stdout.trim() : 'not found'}`);
+        if (!pythonPath) {
+            this.outputChannel.appendLine('[setup] Python: not found');
+        }
 
         let mrmdPythonInstalled = false;
         let mrmdPythonVersion: string | null = null;
 
         // Check if mrmd-python is installed
         if (uvAvailable) {
-            const result = await this.runCommand('uvx mrmd-python --version');
+            const result = await this.runCommand('uvx mrmd-python --list');
             if (result.success) {
                 mrmdPythonInstalled = true;
-                mrmdPythonVersion = result.stdout.trim();
+                mrmdPythonVersion = 'uvx';
+                this.outputChannel.appendLine('[setup] mrmd-python: found (via uvx)');
             }
         }
 
         if (!mrmdPythonInstalled && pythonPath) {
-            const result = await this.runCommand(`${pythonPath} -m mrmd_python --version`);
+            const result = await this.runCommand(`${pythonPath} -m mrmd_python --list`);
             if (result.success) {
                 mrmdPythonInstalled = true;
-                mrmdPythonVersion = result.stdout.trim();
+                mrmdPythonVersion = `${pythonPath} -m mrmd_python`;
+                this.outputChannel.appendLine(`[setup] mrmd-python: found (via ${pythonPath} -m mrmd_python)`);
             }
+        }
+
+        if (!mrmdPythonInstalled) {
+            this.outputChannel.appendLine('[setup] mrmd-python: not found');
         }
 
         return {
@@ -73,6 +90,7 @@ export class SetupManager {
 
         // Already installed
         if (status.mrmdPythonInstalled) {
+            this.outputChannel.appendLine('[setup] mrmd-python is ready');
             return true;
         }
 
@@ -183,6 +201,10 @@ export class SetupManager {
         for (const cmd of candidates) {
             const result = await this.runCommand(`${cmd} --version`);
             if (result.success) {
+                const version = result.stdout.trim() || result.stderr.trim();
+                const which = await this.runCommand(`which ${cmd}`);
+                const path = which.success ? which.stdout.trim() : cmd;
+                this.outputChannel.appendLine(`[setup] Python: ${path} (${version})`);
                 return cmd;
             }
         }
@@ -235,6 +257,6 @@ export class SetupManager {
     }
 
     dispose(): void {
-        this.outputChannel.dispose();
+        // Output channel is shared, disposed by extension
     }
 }

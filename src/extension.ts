@@ -2,10 +2,8 @@
  * mrmd VS Code Extension
  *
  * Execute code blocks in markdown files using the mrmd-packages ecosystem.
- * Communicates with mrmd-python via MRP (MRMD Runtime Protocol).
+ * Communicates with mrmd-python, mrmd-bash, mrmd-r, etc via MRP (MRMD Runtime Protocol).
  *
- * Phase 1: Core execution
- * Phase 2: Rich features (variable explorer, output panel, completions, hover)
  */
 
 import * as vscode from 'vscode';
@@ -26,6 +24,7 @@ import { YjsClient, VsCodeYjsBinding, createMonitorCoordination, MonitorCoordina
 // Extension State
 // ============================================================================
 
+let outputChannel: vscode.OutputChannel;
 let setupManager: SetupManager;
 let orchestratorClient: OrchestratorClient;
 let mrpClient: MrpClient | null = null;
@@ -58,8 +57,11 @@ function getClient(): MrpClient | null {
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
     console.log('mrmd extension activating...');
 
+    // Create shared output channel
+    outputChannel = vscode.window.createOutputChannel('mrmd');
+
     // Create setup manager
-    setupManager = new SetupManager();
+    setupManager = new SetupManager(outputChannel);
 
     // Create providers
     codeLensProvider = new MrmdCodeLensProvider();
@@ -67,7 +69,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     foldingProvider = new OutputFoldingProvider();
 
     // Create orchestrator client
-    orchestratorClient = new OrchestratorClient();
+    orchestratorClient = new OrchestratorClient(outputChannel);
 
     // Create execution manager
     executionManager = new ExecutionManager(codeLensProvider, decorationProvider);
@@ -133,7 +135,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         orchestratorClient,
         executionManager,
         setupManager,
-        statusBarItem
+        statusBarItem,
+        outputChannel
     );
 
     // Register commands
@@ -470,6 +473,8 @@ async function startServices(): Promise<void> {
         vscode.window.showInformationMessage('mrmd services started');
     } catch (err) {
         updateStatusBar(false, 'Error');
+        outputChannel.appendLine(`[startup] Failed to start mrmd: ${err}`);
+        outputChannel.show();
         vscode.window.showErrorMessage(`Failed to start mrmd: ${err}`);
     }
 }

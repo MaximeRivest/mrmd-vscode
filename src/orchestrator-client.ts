@@ -54,8 +54,8 @@ export class OrchestratorClient implements vscode.Disposable {
 
     readonly onStatusChange = this._onStatusChange.event;
 
-    constructor() {
-        this.outputChannel = vscode.window.createOutputChannel('mrmd');
+    constructor(outputChannel: vscode.OutputChannel) {
+        this.outputChannel = outputChannel;
     }
 
     get urls(): OrchestratorUrls | null {
@@ -99,26 +99,31 @@ export class OrchestratorClient implements vscode.Disposable {
         // If user specified a direct runtime URL, use legacy direct mode
         if (directRuntimeUrl && !configuredSyncUrl) {
             this._useFullOrchestrator = false;
+            this.outputChannel.appendLine(`[orchestrator] Using direct runtime URL: ${directRuntimeUrl}`);
             return this.startDirectMode(directRuntimeUrl);
         }
 
         // Full orchestrator mode
         this._useFullOrchestrator = true;
-        this.outputChannel.appendLine('Starting full mrmd orchestrator...');
+        this.outputChannel.appendLine(`[orchestrator] Starting full mrmd orchestrator...`);
+        this.outputChannel.appendLine(`[orchestrator] Orchestrator URL: ${orchestratorUrl}`);
 
         // Check if orchestrator is already running
+        this.outputChannel.appendLine(`[orchestrator] Checking for existing orchestrator at ${orchestratorUrl}...`);
         const existing = await this.checkOrchestrator(orchestratorUrl);
         if (existing) {
-            this.outputChannel.appendLine(`Found running orchestrator at ${orchestratorUrl}`);
+            this.outputChannel.appendLine(`[orchestrator] Found running orchestrator at ${orchestratorUrl}`);
             this._urls = existing;
             this._onStatusChange.fire(await this.getStatus());
             return this._urls;
         }
+        this.outputChannel.appendLine(`[orchestrator] No existing orchestrator found`);
 
         // Start orchestrator
         await this.startOrchestrator(options.workspaceFolder);
 
         // Wait for it to be ready
+        this.outputChannel.appendLine(`[orchestrator] Waiting for orchestrator to respond (timeout: 15s)...`);
         await this.waitForOrchestrator(orchestratorUrl, 15000);
 
         // Get URLs from orchestrator
@@ -184,14 +189,16 @@ export class OrchestratorClient implements vscode.Disposable {
     private async startOrchestrator(cwd?: string): Promise<void> {
         const workDir = cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
 
-        this.outputChannel.appendLine(`Starting mrmd in ${workDir}...`);
+        const args = ['mrmd'];
+        this.outputChannel.appendLine(`[orchestrator] Working directory: ${workDir}`);
+        this.outputChannel.appendLine(`[orchestrator] Spawning: uvx ${args.join(' ')}`);
 
         // Use uvx to run mrmd
         const env = this.getEnv();
 
         return new Promise((resolve, reject) => {
             // Start mrmd as background process
-            this._orchestratorProcess = cp.spawn('uvx', ['mrmd'], {
+            this._orchestratorProcess = cp.spawn('uvx', args, {
                 cwd: workDir,
                 env,
                 detached: true,
@@ -207,9 +214,16 @@ export class OrchestratorClient implements vscode.Disposable {
             });
 
             this._orchestratorProcess.on('error', (err) => {
-                this.outputChannel.appendLine(`Failed to start mrmd: ${err.message}`);
+                this.outputChannel.appendLine(`[orchestrator] Failed to spawn process: ${err.message}`);
                 reject(err);
             });
+
+            this._orchestratorProcess.on('exit', (code, signal) => {
+                this.outputChannel.appendLine(`[orchestrator] Process exited (code=${code}, signal=${signal})`);
+            });
+
+            const pid = this._orchestratorProcess.pid;
+            this.outputChannel.appendLine(`[orchestrator] Process started (pid=${pid})`);
 
             // Don't wait for process to exit - it runs as server
             // Resolve immediately and let waitForOrchestrator handle readiness
@@ -222,13 +236,17 @@ export class OrchestratorClient implements vscode.Disposable {
      */
     private async waitForOrchestrator(url: string, timeout: number): Promise<void> {
         const start = Date.now();
+        let attempts = 0;
         while (Date.now() - start < timeout) {
+            attempts++;
             const result = await this.checkOrchestrator(url);
             if (result) {
+                this.outputChannel.appendLine(`[orchestrator] Orchestrator responded after ${attempts} attempts (${Date.now() - start}ms)`);
                 return;
             }
             await this.sleep(500);
         }
+        this.outputChannel.appendLine(`[orchestrator] Timeout after ${attempts} attempts (${timeout}ms) waiting for ${url}`);
         throw new Error(`Timeout waiting for orchestrator at ${url}`);
     }
 
@@ -382,7 +400,7 @@ export class OrchestratorClient implements vscode.Disposable {
     dispose(): void {
         // Note: We don't stop the orchestrator on dispose
         // It's meant to persist for other sessions
-        this.outputChannel.dispose();
+        // Output channel is shared, disposed by extension
         this._onStatusChange.dispose();
     }
 }
