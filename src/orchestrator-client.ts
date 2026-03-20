@@ -1,18 +1,130 @@
 /**
  * Orchestrator Client
  *
- * Manages the full mrmd stack lifecycle:
- * - mrmd-sync (Yjs server)
- * - mrmd-monitor (execution handler)
- * - mrmd-python (runtime)
+ * Connects to the mrmd daemon (auto-starts if needed).
+ * The daemon is bundled inside the extension — no global install required.
  *
- * Can operate in two modes:
- * - Full orchestrator mode: Start `mrmd` which manages everything
- * - Direct mode: Connect to existing mrmd-python runtime (legacy)
+ * Replaces the old Python orchestrator (uvx mrmd) with the JS daemon.
  */
 
 import * as vscode from 'vscode';
+import * as path from 'path';
 import * as cp from 'child_process';
+import * as fs from 'fs';
+import * as net from 'net';
+import * as os from 'os';
+
+// ── Socket path (must match daemon.js) ────────────────────────
+
+function getSocketPath(): string {
+    if (process.platform === 'win32') {
+        return '\\\\.\\pipe\\mrmd-daemon';
+    }
+    return path.join(os.tmpdir(), `mrmd-daemon-${os.userInfo().uid}.sock`);
+}
+
+function getPidPath(): string {
+    return path.join(os.homedir(), '.mrmd', 'daemon.pid');
+}
+
+function isDaemonRunning(): boolean {
+    const pidPath = getPidPath();
+    if (!fs.existsSync(pidPath)) return false;
+    try {
+        const data = JSON.parse(fs.readFileSync(pidPath, 'utf8'));
+        process.kill(data.pid, 0); // throws if not alive
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+// ── JSON-RPC over Unix socket ─────────────────────────────────
+
+class DaemonConnection {
+    private socket: net.Socket | null = null;
+    private nextId = 1;
+    private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
+    private buffer = '';
+    private eventEmitter: vscode.EventEmitter<{ event: string; data: any }>;
+
+    constructor() {
+        this.eventEmitter = new vscode.EventEmitter();
+    }
+
+    get onEvent() {
+        return this.eventEmitter.event;
+    }
+
+    async connect(socketPath: string): Promise<void> {
+        return new Promise((resolve, reject) => {
+            this.socket = net.createConnection(socketPath);
+            this.socket.on('connect', () => resolve());
+            this.socket.once('error', reject);
+
+            this.socket.on('data', (data) => {
+                this.buffer += data.toString();
+                let newline: number;
+                while ((newline = this.buffer.indexOf('\n')) !== -1) {
+                    const line = this.buffer.slice(0, newline).trim();
+                    this.buffer = this.buffer.slice(newline + 1);
+                    if (line) this.handleMessage(line);
+                }
+            });
+
+            this.socket.on('close', () => {
+                for (const [, { reject }] of this.pending) {
+                    reject(new Error('Daemon disconnected'));
+                }
+                this.pending.clear();
+            });
+        });
+    }
+
+    private handleMessage(raw: string): void {
+        let msg: any;
+        try { msg = JSON.parse(raw); } catch { return; }
+
+        if (msg.event) {
+            this.eventEmitter.fire({ event: msg.event, data: msg.data });
+            return;
+        }
+
+        const pending = this.pending.get(msg.id);
+        if (!pending) return;
+        this.pending.delete(msg.id);
+
+        if (msg.error) {
+            pending.reject(new Error(msg.error));
+        } else {
+            pending.resolve(msg.result);
+        }
+    }
+
+    call(method: string, params: any = {}): Promise<any> {
+        return new Promise((resolve, reject) => {
+            if (!this.socket) {
+                reject(new Error('Not connected'));
+                return;
+            }
+            const id = this.nextId++;
+            this.pending.set(id, { resolve, reject });
+            this.socket.write(JSON.stringify({ id, method, params }) + '\n');
+        });
+    }
+
+    disconnect(): void {
+        this.socket?.destroy();
+        this.socket = null;
+    }
+
+    dispose(): void {
+        this.disconnect();
+        this.eventEmitter.dispose();
+    }
+}
+
+// ── Public types ──────────────────────────────────────────────
 
 export interface OrchestratorUrls {
     orchestrator: string;
@@ -27,30 +139,25 @@ export interface OrchestratorStatus {
     sessions: string[];
 }
 
-export interface SessionInfo {
-    doc: string;
-    monitor_process: string;
-    runtime_process: string;
-    runtime_url: string;
-    dedicated_runtime: boolean;
-    venv: string;
-}
-
-interface RuntimeInfo {
-    id: string;
-    status: string;
+export interface RuntimeInfo {
+    name: string;
+    language: string;
     pid: number;
     port: number;
     url: string;
+    cwd: string;
+    alive: boolean;
+    consumers: string[];
 }
+
+// ── Orchestrator Client ───────────────────────────────────────
 
 export class OrchestratorClient implements vscode.Disposable {
     private outputChannel: vscode.OutputChannel;
+    private connection: DaemonConnection | null = null;
     private _urls: OrchestratorUrls | null = null;
     private _onStatusChange = new vscode.EventEmitter<OrchestratorStatus>();
-    private _runtimeId = 'shared';
-    private _orchestratorProcess: cp.ChildProcess | null = null;
-    private _useFullOrchestrator = true;
+    private _runtimes = new Map<string, RuntimeInfo>(); // language -> runtime
 
     readonly onStatusChange = this._onStatusChange.event;
 
@@ -63,7 +170,7 @@ export class OrchestratorClient implements vscode.Disposable {
     }
 
     get isRunning(): boolean {
-        return this._urls !== null;
+        return this.connection !== null;
     }
 
     get syncUrl(): string | null {
@@ -75,247 +182,151 @@ export class OrchestratorClient implements vscode.Disposable {
     }
 
     /**
-     * Start the mrmd stack.
-     *
-     * This starts the full orchestrator which manages:
-     * - mrmd-sync (Yjs server for collaboration)
-     * - mrmd-monitor (execution via Y.Map)
-     * - mrmd-python (Python runtime)
+     * Start mrmd services. Connects to daemon (auto-starts if needed)
+     * and starts a runtime for the workspace.
      */
     async start(options: {
         workspaceFolder?: string;
-        port?: number;
-        session?: string;
+        language?: string;
     } = {}): Promise<OrchestratorUrls> {
         if (this.isRunning) {
             return this._urls!;
         }
 
-        const config = vscode.workspace.getConfiguration('mrmd');
-        const directRuntimeUrl = config.get<string>('runtimeUrl');
-        const configuredSyncUrl = config.get<string>('syncUrl');
-        const orchestratorUrl = config.get<string>('orchestratorUrl') || 'http://localhost:41580';
+        const cwd = options.workspaceFolder
+            || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
+            || process.cwd();
+        const language = options.language || 'bash'; // Start with bash, add python later
 
-        // If user specified a direct runtime URL, use legacy direct mode
-        if (directRuntimeUrl && !configuredSyncUrl) {
-            this._useFullOrchestrator = false;
-            this.outputChannel.appendLine(`[orchestrator] Using direct runtime URL: ${directRuntimeUrl}`);
-            return this.startDirectMode(directRuntimeUrl);
-        }
+        // 1. Ensure daemon is running and connect
+        await this.ensureDaemon();
 
-        // Full orchestrator mode
-        this._useFullOrchestrator = true;
-        this.outputChannel.appendLine(`[orchestrator] Starting full mrmd orchestrator...`);
-        this.outputChannel.appendLine(`[orchestrator] Orchestrator URL: ${orchestratorUrl}`);
+        // 2. Start a runtime
+        this.outputChannel.appendLine(`[mrmd] Starting ${language} runtime in ${cwd}...`);
+        const rt = await this.startRuntime(language, cwd);
 
-        // Check if orchestrator is already running
-        this.outputChannel.appendLine(`[orchestrator] Checking for existing orchestrator at ${orchestratorUrl}...`);
-        const existing = await this.checkOrchestrator(orchestratorUrl);
-        if (existing) {
-            this.outputChannel.appendLine(`[orchestrator] Found running orchestrator at ${orchestratorUrl}`);
-            this._urls = existing;
-            this._onStatusChange.fire(await this.getStatus());
-            return this._urls;
-        }
-        this.outputChannel.appendLine(`[orchestrator] No existing orchestrator found`);
-
-        // Start orchestrator
-        await this.startOrchestrator(options.workspaceFolder);
-
-        // Wait for it to be ready
-        this.outputChannel.appendLine(`[orchestrator] Waiting for orchestrator to respond (timeout: 15s)...`);
-        await this.waitForOrchestrator(orchestratorUrl, 15000);
-
-        // Get URLs from orchestrator
-        const urls = await this.checkOrchestrator(orchestratorUrl);
-        if (!urls) {
-            throw new Error('Failed to start mrmd orchestrator');
-        }
-
-        this._urls = urls;
-        this._onStatusChange.fire(await this.getStatus());
-        this.outputChannel.appendLine(`mrmd orchestrator ready:`);
-        this.outputChannel.appendLine(`  Orchestrator: ${urls.orchestrator}`);
-        this.outputChannel.appendLine(`  Sync: ${urls.sync}`);
-        this.outputChannel.appendLine(`  Runtime: ${urls.runtime}`);
-
-        return this._urls;
-    }
-
-    /**
-     * Start in direct mode (legacy - just mrmd-python, no sync/monitor)
-     */
-    private async startDirectMode(runtimeUrl: string): Promise<OrchestratorUrls> {
-        this.outputChannel.appendLine(`Using direct runtime URL: ${runtimeUrl}`);
         this._urls = {
             orchestrator: '',
-            runtime: runtimeUrl,
-            sync: '',
+            runtime: rt.url,
+            sync: '', // TODO: sync service integration
         };
+
         this._onStatusChange.fire(await this.getStatus());
+        this.outputChannel.appendLine(`[mrmd] Runtime ready: ${rt.url} (pid ${rt.pid})`);
+
         return this._urls;
     }
 
     /**
-     * Check if orchestrator is running and get its URLs.
+     * Connect to daemon, starting it if needed.
+     * The daemon binary is bundled inside the extension.
      */
-    private async checkOrchestrator(baseUrl: string): Promise<OrchestratorUrls | null> {
-        try {
-            const response = await fetch(`${baseUrl}/api/status`, {
-                signal: AbortSignal.timeout(2000),
-            });
-            if (response.ok) {
-                const status = await response.json() as {
-                    sync_url: string;
-                    runtime_url: string;
-                    ai_url?: string;
-                };
-                return {
-                    orchestrator: baseUrl,
-                    sync: status.sync_url || 'ws://localhost:41444',
-                    runtime: status.runtime_url || 'http://localhost:41765/mrp/v1',
-                    ai: status.ai_url,
-                };
+    private async ensureDaemon(): Promise<void> {
+        const socketPath = getSocketPath();
+
+        if (!isDaemonRunning()) {
+            this.outputChannel.appendLine('[mrmd] Starting daemon...');
+            await this.spawnDaemon();
+
+            // Wait for socket
+            const start = Date.now();
+            while (Date.now() - start < 5000) {
+                if (fs.existsSync(socketPath)) break;
+                await new Promise(r => setTimeout(r, 100));
             }
-        } catch {
-            // Not running
+        }
+
+        // Connect
+        this.connection = new DaemonConnection();
+        await this.connection.connect(socketPath);
+        this.outputChannel.appendLine('[mrmd] Connected to daemon');
+
+        // Forward daemon events
+        this.connection.onEvent(({ event, data }) => {
+            this.outputChannel.appendLine(`[mrmd:event] ${event}: ${JSON.stringify(data).slice(0, 200)}`);
+        });
+    }
+
+    /**
+     * Spawn the daemon process from the bundled mrmd package.
+     */
+    private async spawnDaemon(): Promise<void> {
+        // The daemon entry point is bundled inside the extension's node_modules
+        // or alongside the extension. Find it relative to this file.
+        const daemonScript = this.findDaemonScript();
+
+        if (!daemonScript) {
+            throw new Error('Could not find mrmd daemon script. Is mrmd installed as a dependency?');
+        }
+
+        this.outputChannel.appendLine(`[mrmd] Daemon script: ${daemonScript}`);
+
+        const proc = cp.spawn(process.execPath, [daemonScript, 'daemon', 'start', '--foreground'], {
+            stdio: 'ignore',
+            detached: true,
+            env: { ...process.env },
+        });
+        proc.unref();
+
+        this.outputChannel.appendLine(`[mrmd] Daemon spawned (pid ${proc.pid})`);
+
+        // Wait for it to be ready
+        await new Promise(r => setTimeout(r, 800));
+    }
+
+    /**
+     * Find the daemon script. Looks in:
+     * 1. Extension's node_modules/mrmd/bin/mrmd.js
+     * 2. Sibling package ../mrmd/bin/mrmd.js (dev mode)
+     */
+    private findDaemonScript(): string | null {
+        const candidates = [
+            // Installed as dependency of extension
+            path.resolve(__dirname, '..', 'node_modules', 'mrmd', 'bin', 'mrmd.js'),
+            // Dev mode: sibling in monorepo
+            path.resolve(__dirname, '..', '..', 'mrmd', 'bin', 'mrmd.js'),
+        ];
+
+        for (const p of candidates) {
+            if (fs.existsSync(p)) return p;
         }
         return null;
     }
 
     /**
-     * Start the mrmd orchestrator process.
+     * Start a runtime for a language.
      */
-    private async startOrchestrator(cwd?: string): Promise<void> {
-        const workDir = cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+    async startRuntime(language: string, cwd: string): Promise<RuntimeInfo> {
+        if (!this.connection) throw new Error('Not connected to daemon');
 
-        const args = ['mrmd'];
-        this.outputChannel.appendLine(`[orchestrator] Working directory: ${workDir}`);
-        this.outputChannel.appendLine(`[orchestrator] Spawning: uvx ${args.join(' ')}`);
-
-        // Use uvx to run mrmd
-        const env = this.getEnv();
-
-        return new Promise((resolve, reject) => {
-            // Start mrmd as background process
-            this._orchestratorProcess = cp.spawn('uvx', args, {
-                cwd: workDir,
-                env,
-                detached: true,
-                stdio: ['ignore', 'pipe', 'pipe'],
-            });
-
-            this._orchestratorProcess.stdout?.on('data', (data) => {
-                this.outputChannel.appendLine(`[mrmd] ${data.toString().trim()}`);
-            });
-
-            this._orchestratorProcess.stderr?.on('data', (data) => {
-                this.outputChannel.appendLine(`[mrmd stderr] ${data.toString().trim()}`);
-            });
-
-            this._orchestratorProcess.on('error', (err) => {
-                this.outputChannel.appendLine(`[orchestrator] Failed to spawn process: ${err.message}`);
-                reject(err);
-            });
-
-            this._orchestratorProcess.on('exit', (code, signal) => {
-                this.outputChannel.appendLine(`[orchestrator] Process exited (code=${code}, signal=${signal})`);
-            });
-
-            const pid = this._orchestratorProcess.pid;
-            this.outputChannel.appendLine(`[orchestrator] Process started (pid=${pid})`);
-
-            // Don't wait for process to exit - it runs as server
-            // Resolve immediately and let waitForOrchestrator handle readiness
-            setTimeout(resolve, 500);
-        });
+        const name = `rt:${language}:${Date.now()}`;
+        const rt = await this.connection.call('runtime.start', { name, language, cwd }) as RuntimeInfo;
+        this._runtimes.set(language, rt);
+        return rt;
     }
 
     /**
-     * Wait for orchestrator to be ready.
+     * Get the runtime for a language (start if needed).
      */
-    private async waitForOrchestrator(url: string, timeout: number): Promise<void> {
-        const start = Date.now();
-        let attempts = 0;
-        while (Date.now() - start < timeout) {
-            attempts++;
-            const result = await this.checkOrchestrator(url);
-            if (result) {
-                this.outputChannel.appendLine(`[orchestrator] Orchestrator responded after ${attempts} attempts (${Date.now() - start}ms)`);
-                return;
-            }
-            await this.sleep(500);
-        }
-        this.outputChannel.appendLine(`[orchestrator] Timeout after ${attempts} attempts (${timeout}ms) waiting for ${url}`);
-        throw new Error(`Timeout waiting for orchestrator at ${url}`);
+    async getRuntimeUrl(language: string, cwd?: string): Promise<string> {
+        const existing = this._runtimes.get(language);
+        if (existing?.alive) return existing.url;
+
+        const workDir = cwd
+            || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
+            || process.cwd();
+        const rt = await this.startRuntime(language, workDir);
+        return rt.url;
     }
 
     /**
-     * Create a session for a document.
-     *
-     * This ensures a monitor is watching for executions on this document.
-     */
-    async createSession(docName: string, options: {
-        dedicated?: boolean;
-        venv?: string;
-    } = {}): Promise<SessionInfo> {
-        if (!this._urls?.orchestrator) {
-            throw new Error('Orchestrator not running');
-        }
-
-        const body: Record<string, unknown> = {
-            doc: docName,
-            python: options.dedicated ? 'dedicated' : 'shared',
-        };
-
-        if (options.venv) {
-            body.venv = options.venv;
-        }
-
-        const response = await fetch(`${this._urls.orchestrator}/api/sessions`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-        });
-
-        if (!response.ok) {
-            const text = await response.text();
-            throw new Error(`Failed to create session: ${text}`);
-        }
-
-        return response.json() as Promise<SessionInfo>;
-    }
-
-    /**
-     * Get session info for a document.
-     */
-    async getSession(docName: string): Promise<SessionInfo | null> {
-        if (!this._urls?.orchestrator) {
-            return null;
-        }
-
-        try {
-            const response = await fetch(`${this._urls.orchestrator}/api/sessions/${encodeURIComponent(docName)}`);
-            if (response.ok) {
-                return response.json() as Promise<SessionInfo>;
-            }
-        } catch {
-            // Session not found
-        }
-        return null;
-    }
-
-    /**
-     * Stop the orchestrator.
+     * Stop services (disconnect from daemon — daemon stays running).
      */
     async stop(): Promise<void> {
-        if (this._orchestratorProcess) {
-            this.outputChannel.appendLine('Stopping mrmd orchestrator...');
-            this._orchestratorProcess.kill('SIGTERM');
-            this._orchestratorProcess = null;
-        }
-
+        this.connection?.disconnect();
+        this.connection = null;
         this._urls = null;
+        this._runtimes.clear();
         this._onStatusChange.fire({ running: false, urls: { orchestrator: '', runtime: '', sync: '' }, sessions: [] });
     }
 
@@ -323,84 +334,49 @@ export class OrchestratorClient implements vscode.Disposable {
      * Get current status.
      */
     async getStatus(): Promise<OrchestratorStatus> {
-        if (!this._urls) {
+        if (!this.connection) {
             return { running: false, urls: { orchestrator: '', runtime: '', sync: '' }, sessions: [] };
         }
 
-        if (this._useFullOrchestrator && this._urls.orchestrator) {
-            try {
-                const response = await fetch(`${this._urls.orchestrator}/api/status`, {
-                    signal: AbortSignal.timeout(2000),
-                });
-                if (response.ok) {
-                    const data = await response.json() as { sessions?: string[] };
-                    return {
-                        running: true,
-                        urls: this._urls,
-                        sessions: data.sessions || [],
-                    };
-                }
-            } catch {
-                // Fall through
-            }
-        }
-
-        // Direct mode or orchestrator not responding - check runtime directly
         try {
-            const response = await fetch(`${this._urls.runtime}/capabilities`, {
-                signal: AbortSignal.timeout(2000),
-            });
-            if (response.ok) {
-                return { running: true, urls: this._urls, sessions: ['default'] };
-            }
+            const status = await this.connection.call('daemon.status') as any;
+            const runtimes = await this.connection.call('runtime.list', {}) as RuntimeInfo[];
+            return {
+                running: true,
+                urls: this._urls || { orchestrator: '', runtime: '', sync: '' },
+                sessions: runtimes.map(r => r.name),
+            };
         } catch {
-            this._urls = null;
-        }
-
-        return { running: false, urls: { orchestrator: '', runtime: '', sync: '' }, sessions: [] };
-    }
-
-    /**
-     * Restart the runtime (clear Python session).
-     */
-    async restartRuntime(session?: string): Promise<void> {
-        if (this._urls?.orchestrator) {
-            // Use orchestrator API to restart
-            const response = await fetch(`${this._urls.orchestrator}/api/runtime/restart`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ session: session || 'shared' }),
-            });
-            if (!response.ok) {
-                throw new Error('Failed to restart runtime');
-            }
-        } else {
-            // Direct mode - kill and restart
-            await this.stop();
-            await this.start();
+            return { running: false, urls: { orchestrator: '', runtime: '', sync: '' }, sessions: [] };
         }
     }
 
     /**
-     * Get environment with proper PATH for uvx.
+     * Restart runtime for a language.
      */
-    private getEnv(): NodeJS.ProcessEnv {
-        const env = { ...process.env };
-        const home = process.env.HOME || '';
-        const localBin = `${home}/.local/bin`;
-        const cargoBin = `${home}/.cargo/bin`;
-        env.PATH = `${localBin}:${cargoBin}:${env.PATH || ''}`;
-        return env;
+    async restartRuntime(language?: string): Promise<void> {
+        const lang = language || 'bash';
+        const rt = this._runtimes.get(lang);
+        if (rt && this.connection) {
+            const restarted = await this.connection.call('runtime.restart', { name: rt.name }) as RuntimeInfo;
+            this._runtimes.set(lang, restarted);
+            this._urls = {
+                ...this._urls!,
+                runtime: restarted.url,
+            };
+        }
     }
 
-    private sleep(ms: number): Promise<void> {
-        return new Promise(resolve => setTimeout(resolve, ms));
+    /**
+     * Create a session (stub for monitor mode compatibility).
+     */
+    async createSession(docName: string): Promise<any> {
+        // TODO: implement when monitor/sync are integrated into daemon
+        return { doc: docName };
     }
 
     dispose(): void {
-        // Note: We don't stop the orchestrator on dispose
-        // It's meant to persist for other sessions
-        // Output channel is shared, disposed by extension
+        this.connection?.dispose();
         this._onStatusChange.dispose();
     }
 }
