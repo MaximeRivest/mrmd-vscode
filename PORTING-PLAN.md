@@ -1,5 +1,7 @@
 # mrmd-vscode Porting Plan
 
+> Note: parts of this document are now outdated. In particular, it still assumes session-era MRP and orchestrator-first startup. See `../docs/design/vscode-runtime-manager.md` for the newer runtime-manager-centered design.
+
 ## Overview
 
 Port the VS Code extension from `~/Projects/mrmd/vscode` to use the mrmd-packages ecosystem (MRP protocol, mrmd-python, mrmd-sync, mrmd-ai).
