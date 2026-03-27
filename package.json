@@ -26,11 +26,80 @@
     "literate programming",
     "repl"
   ],
+  "extensionDependencies": [
+    "yzhang.markdown-all-in-one"
+  ],
   "activationEvents": [
-    "onLanguage:markdown"
+    "onLanguage:markdown",
+    "onView:mrmd.runtimes",
+    "onView:mrmd.environments",
+    "onView:mrmd.executions"
   ],
   "main": "./dist/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "mrmd-sidebar",
+          "title": "mrmd",
+          "icon": "resources/icons/mrmd.svg"
+        }
+      ]
+    },
+    "views": {
+      "mrmd-sidebar": [
+        { "id": "mrmd.runtimes", "name": "Runtimes" },
+        { "id": "mrmd.environments", "name": "Environments" },
+        { "id": "mrmd.executions", "name": "Executions" }
+      ]
+    },
+    "colors": [
+      {
+        "id": "mrmd.codeBlockBackground",
+        "description": "Background color for code blocks (fence lines + body)",
+        "defaults": {
+          "dark": "#ffffff0c",
+          "light": "#0000000a",
+          "highContrast": "#ffffff14"
+        }
+      },
+      {
+        "id": "mrmd.activeCellBackground",
+        "description": "Background color for the active (cursor) code cell",
+        "defaults": {
+          "dark": "#ffffff12",
+          "light": "#00000010",
+          "highContrast": "#ffffff1c"
+        }
+      },
+      {
+        "id": "mrmd.outputBlockBackground",
+        "description": "Background color for output/result blocks",
+        "defaults": {
+          "dark": "#ffffff04",
+          "light": "#00000004",
+          "highContrast": "#ffffff08"
+        }
+      },
+      {
+        "id": "mrmd.statusSuccess",
+        "description": "Color for the ✓ success indicator on code cells",
+        "defaults": {
+          "dark": "#4EC9B0aa",
+          "light": "#16825Daa",
+          "highContrast": "#4EC9B0"
+        }
+      },
+      {
+        "id": "mrmd.statusError",
+        "description": "Color for the ✗ error indicator on code cells",
+        "defaults": {
+          "dark": "#F44747aa",
+          "light": "#E51400aa",
+          "highContrast": "#F44747"
+        }
+      }
+    ],
     "commands": [
       {
         "command": "mrmd.run",
@@ -46,8 +115,102 @@
         "command": "mrmd.interrupt",
         "title": "Interrupt Execution",
         "category": "mrmd"
+      },
+      {
+        "command": "mrmd.refreshRuntimes",
+        "title": "Refresh Runtimes",
+        "category": "mrmd",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "mrmd.refreshEnvironments",
+        "title": "Refresh Environments",
+        "category": "mrmd",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "mrmd.refreshExecutions",
+        "title": "Refresh Executions",
+        "category": "mrmd",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "mrmd.stopRuntime",
+        "title": "Stop Runtime",
+        "category": "mrmd",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "mrmd.restartRuntime",
+        "title": "Restart Runtime",
+        "category": "mrmd",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "mrmd.useEnvironment",
+        "title": "Use This Environment",
+        "category": "mrmd"
+      },
+      {
+        "command": "mrmd.installBridge",
+        "title": "Install mrmd-python",
+        "category": "mrmd",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "mrmd.cancelExecution",
+        "title": "Cancel Execution",
+        "category": "mrmd",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "mrmd.pickEnvironment",
+        "title": "Select Python Environment",
+        "category": "mrmd",
+        "icon": "$(search)"
+      },
+      {
+        "command": "mrmd.pickScope",
+        "title": "Set Runtime Scope",
+        "category": "mrmd"
+      },
+      {
+        "command": "mrmd.pickCwd",
+        "title": "Set Working Directory",
+        "category": "mrmd"
+      },
+      {
+        "command": "mrmd.startRuntime",
+        "title": "Start Runtime",
+        "category": "mrmd",
+        "icon": "$(play)"
+      },
+      {
+        "command": "mrmd.showPreferences",
+        "title": "Python Runtime Config",
+        "category": "mrmd",
+        "icon": "$(gear)"
       }
     ],
+    "menus": {
+      "view/title": [
+        { "command": "mrmd.startRuntime", "when": "view == mrmd.runtimes", "group": "navigation" },
+        { "command": "mrmd.refreshRuntimes", "when": "view == mrmd.runtimes", "group": "navigation" },
+        { "command": "mrmd.pickEnvironment", "when": "view == mrmd.environments", "group": "navigation" },
+        { "command": "mrmd.showPreferences", "when": "view == mrmd.environments", "group": "navigation" },
+        { "command": "mrmd.refreshEnvironments", "when": "view == mrmd.environments", "group": "navigation" },
+        { "command": "mrmd.refreshExecutions", "when": "view == mrmd.executions", "group": "navigation" }
+      ],
+      "view/item/context": [
+        { "command": "mrmd.stopRuntime", "when": "view == mrmd.runtimes && viewItem == runtime", "group": "inline" },
+        { "command": "mrmd.restartRuntime", "when": "view == mrmd.runtimes && viewItem == runtime", "group": "inline" },
+        { "command": "mrmd.useEnvironment", "when": "view == mrmd.environments && viewItem =~ /^env-/", "group": "1_actions" },
+        { "command": "mrmd.pickScope", "when": "view == mrmd.environments && viewItem == section", "group": "2_config" },
+        { "command": "mrmd.pickCwd", "when": "view == mrmd.environments && viewItem == section", "group": "2_config" },
+        { "command": "mrmd.installBridge", "when": "view == mrmd.environments && viewItem == env-needs-bridge", "group": "inline" },
+        { "command": "mrmd.cancelExecution", "when": "view == mrmd.executions && viewItem == execution-active", "group": "inline" }
+      ]
+    },
     "keybindings": [
       {
         "command": "mrmd.run",
@@ -65,10 +228,35 @@
         "key": "escape",
         "when": "editorTextFocus && editorLangId == markdown && mrmd.isExecuting"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "mrmd — Markdown Notebooks",
+      "properties": {
+        "mrmd.runButton.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inline 'run' button on code cell fence lines"
+        },
+        "mrmd.decorations.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable notebook-style cell decorations (background shading, dimmed fences, status indicators)"
+        },
+        "mrmd.decorations.dimFences": {
+          "type": "boolean",
+          "default": true,
+          "description": "Dim and shrink the ``` fence lines to reduce visual noise"
+        },
+        "mrmd.decorations.statusIndicators": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show execution status indicators (⏳ running, ✓ success, ✗ error) on code cells"
+        }
+      }
+    }
   },
   "scripts": {
-    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap",
+    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:mrmd --format=cjs --platform=node --sourcemap",
     "watch": "npm run build -- --watch",
     "package": "vsce package"
   },
@@ -79,6 +267,8 @@
     "typescript": "^5.3.0"
   },
   "dependencies": {
-    "mrmd": "file:../mrmd"
+    "mrmd": "file:../mrmd",
+    "yjs": "^13.6.0",
+    "y-websocket": "^2.0.0"
   }
 }
